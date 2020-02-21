@@ -89,7 +89,7 @@ impl<'device> FileSystem<'device> {
         }
     }
     /// This function assumes that you have exclusive access to that part of memory
-    unsafe fn get_inode_in_table<'a>(&self, inode: u32) -> &'a mut InodeData {
+    unsafe fn get_inode_in_table<'a>(&self, inode: u32) -> *mut InodeData {
         let block_group = (inode - 1) / self.superblock.inode_count_in_group;
         let index = (inode - 1) % self.superblock.inode_count_in_group;
 
@@ -155,14 +155,17 @@ pub enum EntryKind {
 }
 
 pub struct Inode<'fs, 'device> {
-    pub data: &'fs mut InodeData,
+    data: *mut InodeData,
 
     fs: &'fs FileSystem<'device>,
 }
 
 impl<'fs, 'device> Inode<'fs, 'device> {
+    pub fn get_data(&self) -> *const InodeData {
+        self.data
+    }
     pub fn get_dir_entries(&self) -> Option<DirectoryEntries<'_, 'fs, 'device>> {
-        if !self.data.type_permission.contains(TypePermission::DIR) {
+        if !unsafe { (*self.data).type_permission }.contains(TypePermission::DIR) {
             None
         } else {
             Some(DirectoryEntries {
@@ -182,14 +185,14 @@ impl<'inode, 'fs, 'device> core::iter::Iterator for DirectoryEntries<'inode, 'fs
     type Item = DirectoryEntry<'fs>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.read >= self.inode.data.size_lower_32_bits {
+        if self.read >= unsafe { (*self.inode.data).size_lower_32_bits } {
             None
         } else {
             let entry = unsafe {
                 DirectoryEntry::from_ptr(
                     self.inode
                         .fs
-                        .get_block(self.inode.data.direct_block_pointer_0)
+                        .get_block((*self.inode.data).direct_block_pointer_0)
                         .offset(self.read as isize),
                 )
             };
@@ -277,8 +280,8 @@ pub struct InodeData {
 }
 
 impl InodeData {
-    unsafe fn from_ptr<'a>(inode: *mut u8) -> &'a mut InodeData {
-        (inode as *mut InodeData).as_mut().expect("inode was null")
+    unsafe fn from_ptr<'a>(inode: *mut u8) -> *mut InodeData {
+        inode as *mut InodeData
     }
 }
 
@@ -521,6 +524,7 @@ pub struct UnsupportedFeatures(pub u32);
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use std::io::Read;
 
     use super::BlockGroupDescriptor;
     use super::ExtendedSuperblock;
@@ -528,19 +532,18 @@ mod tests {
     use super::BLOCK_GROUP_DESCRITPOR_SIZE;
     use super::EXTENDED_SUPERBLOCK_SIZE;
     use super::SUPERBLOCK_SIZE;
-    use memmap::MmapOptions;
 
     #[test]
     fn map_test_file() {
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open("test_fs")
             .unwrap();
-        let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
-        let mut mmap = mmap.make_mut().unwrap();
+        let mut backing = std::vec::Vec::with_capacity(500_000);
+        file.read_to_end(&mut backing).unwrap();
+        let ptr = backing.as_mut_ptr();
 
-        let ptr = mmap.as_mut_ptr();
         let (superblock, _extended) = unsafe { Superblock::from_ptr(ptr.offset(1024)) };
         assert_eq!(superblock.inode_count, 56);
     }

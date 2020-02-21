@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use rdc2::{EntryKind, FileSystem, Inode, Ext2Device};
+use rdc2::{EntryKind, Ext2Device, FileSystem, Inode};
 
 fn list(fs: &FileSystem<'_>, inode: &Inode<'_, '_>, tabs: usize) {
     if let Some(entries) = inode.get_dir_entries() {
@@ -36,7 +36,7 @@ fn main() {
     dbg!(fs.get_extended_superblock());
     dbg!(fs.get_block_group_descriptor_table());
     let root = unsafe { fs.get_root() };
-    dbg!(&root.data);
+    dbg!(unsafe { &*root.get_data() });
 
     println!("/:");
     list(&fs, &root, 2);
