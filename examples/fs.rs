@@ -18,7 +18,7 @@ fn list(fs: &FileSystem<'_>, inode: &Inode<'_, '_>, tabs: usize) {
                     let file = unsafe { fs.get_inode(entry.inode) };
                     let mut content = Vec::new();
                     read_to_end(&file, &mut content);
-                    for _ in 0..tabs {
+                    for _ in 0..(tabs + 2) {
                         print!(" ");
                     }
                     println!("content: {}", String::from_utf8(content).unwrap());
