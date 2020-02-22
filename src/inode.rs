@@ -3,9 +3,14 @@ use bstr::{BStr, ByteSlice};
 
 use super::FileSystem;
 
+/// A reference to an inode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct InodeRef(pub(crate) u32);
+
 #[repr(C)]
 struct RawDirectoryEntry {
-    pub inode: u32,
+    pub inode: InodeRef,
     pub size: u16,
     pub name_len: u8,
     pub kind: EntryKind,
@@ -13,7 +18,7 @@ struct RawDirectoryEntry {
 
 #[derive(Debug)]
 pub struct DirectoryEntry<'fs> {
-    pub inode: u32,
+    pub inode: InodeRef,
     pub size: u16,
     pub kind: EntryKind,
     pub name: &'fs BStr,

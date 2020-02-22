@@ -3,7 +3,7 @@ extern crate core;
 
 pub mod inode;
 pub mod metadata;
-pub use inode::Inode;
+pub use inode::{Inode, InodeRef};
 
 use inode::InodeData;
 use metadata::{BlockGroupDescriptor, ExtendedSuperblock, Superblock};
@@ -75,18 +75,15 @@ impl<'device> FileSystem<'device> {
         self.block_group_descriptor_table
     }
 
-    /// Safety: You must never hold two references to the root
     #[inline(always)]
-    pub unsafe fn get_root(&self) -> Inode<'_, 'device> {
-        self.get_inode(2)
+    pub fn get_root(&self) -> Inode<'_, 'device> {
+        self.get_inode(InodeRef(2))
     }
 
-    // TODO: NewType InodeRef to be unable to give an incorrect one
-    /// Safety: use a in bounds inode
-    pub unsafe fn get_inode(&self, inode: u32) -> Inode<'_, 'device> {
+    pub fn get_inode(&self, inode: InodeRef) -> Inode<'_, 'device> {
         // I think it is safe because Inodes use *mut InodeData, you
         // can give multiple of them
-        Inode::from_fs(self, self.get_inode_in_table(inode))
+        unsafe { Inode::from_fs(self, self.get_inode_in_table(inode.0)) }
     }
     /// This function assumes that you have exclusive access to that part of memory
     unsafe fn get_inode_in_table<'a>(&self, inode: u32) -> *mut InodeData {
