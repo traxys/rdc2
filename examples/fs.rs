@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use rdc2::{EntryKind, Ext2Device, FileSystem, Inode};
+use rdc2::{inode::EntryKind, Ext2Device, FileSystem, Inode};
 
 fn list(fs: &FileSystem<'_>, inode: &Inode<'_, '_>, tabs: usize) {
     if let Some(entries) = inode.get_dir_entries() {
