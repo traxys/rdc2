@@ -13,8 +13,29 @@ fn list(fs: &FileSystem<'_>, inode: &Inode<'_, '_>, tabs: usize) {
                     println!("{}:", entry.name);
                     list(fs, unsafe { &fs.get_inode(entry.inode) }, tabs + 4)
                 }
+                EntryKind::RegularFile => {
+                    println!("file {}", entry.name);
+                    let file = unsafe { fs.get_inode(entry.inode) };
+                    let mut content = Vec::new();
+                    read_to_end(&file, &mut content);
+                    for _ in 0..tabs {
+                        print!(" ");
+                    }
+                    println!("content: {}", String::from_utf8(content).unwrap());
+                }
                 k => println!("{:?} {}", k, entry.name),
             }
+        }
+    }
+}
+fn read_to_end(inode: &Inode<'_, '_>, buffer: &mut Vec<u8>) {
+    let mut reader = inode.reader();
+    while let Some((ptr, size)) = reader.read(None) {
+        if size != 0 {
+            let slice = unsafe { std::slice::from_raw_parts(ptr, size as usize) };
+            buffer.extend_from_slice(slice);
+        } else {
+            break;
         }
     }
 }

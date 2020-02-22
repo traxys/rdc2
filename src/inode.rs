@@ -72,7 +72,7 @@ impl<'fs, 'device> Inode<'fs, 'device> {
     pub fn get_data(&self) -> *const InodeData {
         self.data
     }
-    fn reader(&self) -> ReadInode<'_, 'fs, 'device> {
+    pub fn reader(&self) -> ReadInode<'_, 'fs, 'device> {
         ReadInode::new(self)
     }
     pub fn get_dir_entries(&self) -> Option<DirectoryEntries<'_, 'fs, 'device>> {
@@ -157,10 +157,13 @@ impl<'inode, 'fs, 'device> ReadInode<'inode, 'fs, 'device> {
         true
     }
     /// Reads up to max_amount bytes from the inode
-    pub fn read(&mut self, max_amount: u32) -> Option<(*mut u8, u32)> {
+    pub fn read(&mut self, max_amount: Option<u32>) -> Option<(*mut u8, u32)> {
         unsafe {
             self.read_with(|input, remaining_in_block| {
-                let amount = core::cmp::min(max_amount, remaining_in_block);
+                let amount = match max_amount {
+                    Some(max_amount) => core::cmp::min(max_amount, remaining_in_block),
+                    None => remaining_in_block,
+                };
                 (input, amount)
             })
         }
