@@ -63,6 +63,8 @@ pub enum EntryKind {
 
 pub struct Inode<'fs, 'device> {
     data: *mut InodeData,
+    id: u32,
+    group: u32,
 
     pub(crate) fs: &'fs FileSystem<'device>,
 }
@@ -70,15 +72,38 @@ pub struct Inode<'fs, 'device> {
 impl<'fs, 'device> Inode<'fs, 'device> {
     pub(crate) unsafe fn from_fs(
         fs: &'fs FileSystem<'device>,
+        id: u32,
         inode: *mut InodeData,
     ) -> Inode<'fs, 'device> {
-        Inode { data: inode, fs }
+        let group = fs.group_of_inode(InodeRef(id));
+        Inode {
+            group,
+            data: inode,
+            fs,
+            id,
+        }
     }
     pub fn get_data(&self) -> *const InodeData {
         self.data
     }
     pub fn reader(&self) -> ReadInode<'_, 'fs, 'device> {
         ReadInode::new(self)
+    }
+    pub fn writer(&self) -> WriteInode<'_, 'fs, 'device> {
+        WriteInode::new(self)
+    }
+    pub fn inode_ref(&self) -> InodeRef {
+        InodeRef(self.id)
+    }
+    fn reserve_block(&self) -> u32 {
+        let new_block = self.fs.reserve_block(self.group);
+        for block in unsafe{&mut (*self.data).direct_block_pointers} {
+            if *block == 0 {
+                *block = new_block;
+                break
+            }
+        }
+        new_block
     }
     pub fn get_dir_entries(&self) -> Option<DirectoryEntries<'_, 'fs, 'device>> {
         if !unsafe { (*self.data).type_permission }.contains(TypePermission::DIR) {
@@ -92,6 +117,7 @@ impl<'fs, 'device> Inode<'fs, 'device> {
 }
 
 struct InodeBlocks<'inode, 'fs, 'device> {
+    remaining_blocks: u32,
     block_count: usize,
     single_count: usize,
     double_count: usize,
@@ -101,7 +127,15 @@ struct InodeBlocks<'inode, 'fs, 'device> {
 
 impl<'inode, 'fs, 'device> InodeBlocks<'inode, 'fs, 'device> {
     fn new(inode: &'inode Inode<'fs, 'device>) -> Self {
+        let block_size = inode.fs.block_size as u32;
+        let total_size = unsafe { (*inode.data).size_lower_32_bits };
+        let remaining_blocks = if total_size % block_size == 0 {
+            total_size / block_size
+        } else {
+            (total_size / block_size) + 1
+        };
         InodeBlocks {
+            remaining_blocks,
             block_count: 0,
             single_count: 0,
             double_count: 0,
@@ -115,14 +149,84 @@ impl<'inode, 'fs, 'device> core::iter::Iterator for InodeBlocks<'inode, 'fs, 'de
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.block_count < 12 {
-            //TODO: use the indirections
-            let block = unsafe { (*self.inode.data).direct_block_pointers[self.block_count] };
-            self.block_count += 1;
-            Some(block)
+        if self.remaining_blocks > 0 {
+            if self.block_count < 12 {
+                //TODO: use the indirections
+                let block = unsafe { (*self.inode.data).direct_block_pointers[self.block_count] };
+                self.block_count += 1;
+                self.remaining_blocks -= 1;
+
+                if block == 0 {
+                    panic!("Tried to read from block 0:\nRem: {}, Blocks: {:?}", self.remaining_blocks, unsafe {
+                        (*self.inode.data).direct_block_pointers
+                    });
+                }
+                Some(block)
+            } else {
+                panic!("Can't read in indirect blocks")
+            }
         } else {
             None
         }
+    }
+}
+
+pub struct WriteInode<'inode, 'fs, 'device> {
+    total_written: u32,
+    index_in_block: u32,
+    block_size: u32,
+    allocated_blocks: InodeBlocks<'inode, 'fs, 'device>,
+    current_head: *mut u8,
+    inode: &'inode Inode<'fs, 'device>,
+}
+
+impl<'inode, 'fs, 'device> WriteInode<'inode, 'fs, 'device> {
+    fn new(inode: &'inode Inode<'fs, 'device>) -> Self {
+        let block_size = inode.fs.block_size as u32;
+        let mut blocks = InodeBlocks::new(inode);
+        let current_block = match blocks.next() {
+            Some(b) => b,
+            None => inode.reserve_block(),
+        };
+        let current_head = unsafe { inode.fs.get_block(current_block) };
+
+        WriteInode {
+            total_written: 0,
+            index_in_block: 0,
+            block_size,
+            allocated_blocks: blocks,
+            current_head,
+            inode,
+        }
+    }
+    pub fn write(&mut self, data: &[u8]) {
+        let mut current = 0;
+        while current < data.len() as u32 {
+            if self.index_in_block < self.block_size {
+                unsafe {
+                    (*self.current_head) = data[current as usize];
+                    self.current_head = self.current_head.offset(1);
+                    self.total_written += 1;
+                }
+                self.index_in_block += 1;
+                current += 1;
+            } else {
+                self.index_in_block = 0;
+                match self.allocated_blocks.next() {
+                    Some(b) => self.current_head = unsafe { self.inode.fs.get_block(b) },
+                    None => {
+                        self.current_head = unsafe {
+                            self.inode
+                                .fs
+                                .get_block(self.inode.reserve_block())
+                        }
+                    }
+                }
+            }
+        }
+        let current_size = unsafe { (*self.inode.data).size_lower_32_bits };
+        let new_size = core::cmp::max(current_size, self.total_written);
+        unsafe { (*self.inode.data).size_lower_32_bits = new_size }
     }
 }
 
@@ -191,6 +295,9 @@ impl<'inode, 'fs, 'device> ReadInode<'inode, 'fs, 'device> {
             .get_block(self.current_block)
             .offset(self.index_in_block as isize);
         let (value, size) = reader(ptr, self.remaining_in_block);
+        if !(size <= self.remaining_in_block) {
+            panic!("{}, {}", size, self.remaining_in_block);
+        }
         assert!(
             size <= self.remaining_in_block,
             "You should read less than what remains in the block"

@@ -8,3 +8,6 @@ edition = "2018"
 bitflags = "1.2.1"
 cstr_core = "0.1.2"
 bstr = "0.2.11"
+
+[dev-dependencies]
+memmap = "0.7.0"

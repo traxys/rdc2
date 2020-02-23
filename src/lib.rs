@@ -80,14 +80,51 @@ impl<'device> FileSystem<'device> {
         self.get_inode(InodeRef(2))
     }
 
+    fn reserve_bitmap(&self, start: *mut u8) -> u32 {
+        let mut bitmap_block = start;
+        let mut index = 0;
+
+        while index < 1024 && unsafe { *bitmap_block } == 255 {
+            index += 1;
+            bitmap_block = unsafe { bitmap_block.offset(1) };
+        }
+
+        let byte = unsafe { *bitmap_block };
+
+        let mut reserved_in_current = None;
+        for i in 0..8 {
+            if byte & (1 << i) == 0 {
+                reserved_in_current = Some(i);
+                break;
+            }
+        }
+        let reserved_in_current = reserved_in_current.unwrap();
+        unsafe { *bitmap_block |= 1 << reserved_in_current }
+        index * 8 + reserved_in_current
+    }
+    fn reserve_block(&self, group: u32) -> u32 {
+        let bitmap =
+            self.get_block_group_descriptor_table()[group as usize].block_address_of_block_bitmap;
+        self.reserve_bitmap(unsafe { self.get_block(bitmap) })
+    }
+    fn reserve_inode(&self, group: u32) -> InodeRef {
+        let bitmap =
+            self.get_block_group_descriptor_table()[group as usize].block_address_of_inode_bitmap;
+        InodeRef(self.reserve_bitmap(unsafe { self.get_block(bitmap) }))
+    }
+
     pub fn get_inode(&self, inode: InodeRef) -> Inode<'_, 'device> {
         // I think it is safe because Inodes use *mut InodeData, you
         // can give multiple of them
-        unsafe { Inode::from_fs(self, self.get_inode_in_table(inode.0)) }
+        unsafe { Inode::from_fs(self, inode.0, self.get_inode_in_table(inode.0)) }
     }
+    pub(crate) fn group_of_inode(&self, inode: InodeRef) -> u32 {
+        (inode.0 - 1) / self.superblock.inode_count_in_group
+    }
+
     /// This function assumes that you have exclusive access to that part of memory
     unsafe fn get_inode_in_table<'a>(&self, inode: u32) -> *mut InodeData {
-        let block_group = (inode - 1) / self.superblock.inode_count_in_group;
+        let block_group = self.group_of_inode(InodeRef(inode));
         let index = (inode - 1) % self.superblock.inode_count_in_group;
 
         let inode_table =

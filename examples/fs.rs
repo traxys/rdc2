@@ -1,4 +1,4 @@
-use std::io::Read;
+use memmap::MmapOptions;
 
 use rdc2::{inode::EntryKind, Ext2Device, FileSystem, Inode};
 
@@ -11,11 +11,16 @@ fn list(fs: &FileSystem<'_>, inode: &Inode<'_, '_>, tabs: usize) {
             match entry.kind {
                 EntryKind::Directory => {
                     println!("{}:", entry.name);
-                    list(fs, unsafe { &fs.get_inode(entry.inode) }, tabs + 4)
+                    list(fs, &fs.get_inode(entry.inode), tabs + 4)
                 }
                 EntryKind::RegularFile => {
                     println!("file {}", entry.name);
-                    let file = unsafe { fs.get_inode(entry.inode) };
+                    let file = fs.get_inode(entry.inode);
+                    dbg!(unsafe { &*file.get_data() });
+                    if entry.name == "foo" {
+                        write_things(&file);
+                    }
+
                     let mut content = Vec::new();
                     read_to_end(&file, &mut content);
                     for _ in 0..(tabs + 2) {
@@ -39,16 +44,20 @@ fn read_to_end(inode: &Inode<'_, '_>, buffer: &mut Vec<u8>) {
         }
     }
 }
+fn write_things(inode: &Inode<'_, '_>) {
+    let mut writer = inode.writer();
+    for i in 0..500 {
+        writer.write(format!("{}\n", i).as_bytes())
+    }
+}
 
 fn main() {
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("test_fs")
         .unwrap();
-    let mut device = Vec::with_capacity(1_000_000);
-    file.read_to_end(&mut device).unwrap();
-
+    let mut device = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
     let ptr = device.as_mut_ptr();
 
     let mut device = unsafe { Ext2Device::from_ptr(ptr) };
@@ -56,7 +65,7 @@ fn main() {
     dbg!(fs.get_superblock());
     dbg!(fs.get_extended_superblock());
     dbg!(fs.get_block_group_descriptor_table());
-    let root = unsafe { fs.get_root() };
+    let root = fs.get_root();
     dbg!(unsafe { &*root.get_data() });
 
     println!("/:");
