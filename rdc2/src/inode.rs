@@ -9,6 +9,10 @@ use core::convert::TryFrom;
 #[repr(transparent)]
 pub struct InodeRef(pub(crate) u32);
 
+pub const fn root_inode() -> InodeRef {
+    InodeRef(2)
+}
+
 #[derive(Debug)]
 #[repr(C)]
 struct RawDirectoryEntry {
@@ -77,12 +81,14 @@ impl EntryKind {
     }
 }
 
+#[repr(C)]
 pub struct Inode<'fs, 'device> {
     data: *mut InodeData,
+    pub(crate) fs: &'fs FileSystem<'device>,
+
     id: u32,
     group: u32,
 
-    pub(crate) fs: &'fs FileSystem<'device>,
 }
 
 impl<'fs, 'device> Inode<'fs, 'device> {
@@ -186,6 +192,7 @@ impl<'fs, 'device> Inode<'fs, 'device> {
     }
 }
 
+#[repr(C)]
 pub struct Cursor<'inode, 'fs, 'device> {
     inode: &'inode Inode<'fs, 'device>,
 
@@ -339,6 +346,7 @@ impl<'inode, 'fs, 'device> Cursor<'inode, 'fs, 'device> {
     }
 }
 
+#[repr(C)]
 pub struct DirectoryEntries<'inode, 'fs, 'device> {
     reader: Cursor<'inode, 'fs, 'device>,
 }
@@ -458,6 +466,7 @@ impl<'inode, 'fs, 'device> core::iter::Iterator for DirectoryEntries<'inode, 'fs
 }
 
 bitflags! {
+    #[repr(C)]
     pub struct Permission: u16 {
         const OTHER_EXECUTE = 0o00001;
         const OTHER_WRITE = 0o00002;
@@ -480,6 +489,7 @@ impl Permission {
     }
 }
 bitflags! {
+    #[repr(C)]
     pub struct TypePermission: u16 {
         const FIFO = 0x1000;
         const CHAR_DEVICE = 0x2000;
@@ -504,6 +514,7 @@ bitflags! {
     }
 }
 bitflags! {
+    #[repr(C)]
     pub struct InodeFlags: u32 {
         const SECURE_DELETION = 0x00000001;
         const COPY_ON_DELETION = 0x00000002;

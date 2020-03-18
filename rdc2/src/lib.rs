@@ -36,31 +36,28 @@ impl Ext2Device {
 
         let block_table = if superblock.log_block_size == 0 { 2 } else { 1 };
 
-        let block_group_descriptor_table = unsafe {
-            BlockGroupDescriptor::table_from_ptr(
-                // We look at block 1
-                self.device.offset((block_size * block_table) as isize),
-                number_of_groups,
-            )
-        };
-
         FileSystem {
             fs: self.device,
             block_size,
             superblock,
             extended,
-            block_group_descriptor_table,
+            block_group_descriptor_table: unsafe {
+                self.device.offset((block_size * block_table) as isize)
+            } as *mut BlockGroupDescriptor,
+            block_group_descriptor_table_len: number_of_groups,
         }
     }
 }
 
 /// The main way to interact with the filesystem
+#[repr(C)]
 pub struct FileSystem<'device> {
     fs: *mut u8,
     superblock: &'device mut Superblock,
     extended: &'device mut ExtendedSuperblock,
 
-    block_group_descriptor_table: &'device mut [BlockGroupDescriptor],
+    block_group_descriptor_table: *mut BlockGroupDescriptor,
+    block_group_descriptor_table_len: usize,
     block_size: usize,
 }
 
@@ -72,7 +69,12 @@ impl<'device> FileSystem<'device> {
         self.extended
     }
     pub fn get_block_group_descriptor_table(&self) -> &[BlockGroupDescriptor] {
-        self.block_group_descriptor_table
+        unsafe {
+            core::slice::from_raw_parts(
+                self.block_group_descriptor_table,
+                self.block_group_descriptor_table_len,
+            )
+        }
     }
 
     #[inline(always)]
@@ -135,8 +137,8 @@ impl<'device> FileSystem<'device> {
         let block_group = self.group_of_inode(InodeRef(inode));
         let index = (inode - 1) % self.superblock.inode_count_in_group;
 
-        let inode_table =
-            self.block_group_descriptor_table[block_group as usize].starting_block_of_inode_table;
+        let inode_table = self.get_block_group_descriptor_table()[block_group as usize]
+            .starting_block_of_inode_table;
 
         let inode_table_offset = self
             .get_block(inode_table)

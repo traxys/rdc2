@@ -1,0 +1,10 @@
+language = "C"
+
+style = "tag"
+
+[parse]
+parse_deps = true
+include = ["rdc2"]
+
+[parse.expand]
+crates = ["rdc2"]

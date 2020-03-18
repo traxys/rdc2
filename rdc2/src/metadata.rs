@@ -15,14 +15,6 @@ pub struct BlockGroupDescriptor {
     _unused: [u8; 14],
 }
 
-impl BlockGroupDescriptor {
-    pub(crate) unsafe fn table_from_ptr<'a>(
-        start: *mut u8,
-        number_of_groups: usize,
-    ) -> &'a mut [BlockGroupDescriptor] {
-        core::slice::from_raw_parts_mut(start as *mut BlockGroupDescriptor, number_of_groups)
-    }
-}
 impl core::fmt::Debug for BlockGroupDescriptor {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("BlockGroupDescriptor")
@@ -209,6 +201,7 @@ impl core::fmt::Debug for Id {
 }
 
 bitflags! {
+    #[repr(C)]
     pub struct OptionalFeatures: u32 {
         const PREALLOCATE = 0x0001;
         const AFS_SERVER = 0x0002;
@@ -220,6 +213,7 @@ bitflags! {
 }
 
 bitflags! {
+    #[repr(C)]
     pub struct RequiredFeatures: u32 {
         const COMPRESSION = 0x0001;
         const TYPED_DIRECTORY = 0x0002;
@@ -229,6 +223,7 @@ bitflags! {
 }
 
 bitflags! {
+    #[repr(C)]
     pub struct WriteFeatures: u32 {
         const SPARSE_SUPERBLOCK_GROUP_DESCRIPTOR_TABLE = 0x0001;
         const FILE_SIZE_64 = 0x0002;
