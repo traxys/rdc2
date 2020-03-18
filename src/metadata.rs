@@ -245,7 +245,6 @@ mod tests {
     use super::EXTENDED_SUPERBLOCK_SIZE;
     use super::SUPERBLOCK_SIZE;
 
-
     #[test]
     fn block_descriptor_size() {
         assert_eq!(

@@ -2,12 +2,14 @@ use bitflags::bitflags;
 use bstr::{BStr, ByteSlice};
 
 use super::FileSystem;
+use core::convert::TryFrom;
 
 /// A reference to an inode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct InodeRef(pub(crate) u32);
 
+#[derive(Debug)]
 #[repr(C)]
 struct RawDirectoryEntry {
     pub inode: InodeRef,
@@ -25,8 +27,8 @@ pub struct DirectoryEntry<'fs> {
 }
 
 impl RawDirectoryEntry {
-    unsafe fn from_ptr<'fs>(entry: *const u8) -> (*const RawDirectoryEntry, &'fs BStr) {
-        let dir_entry = entry as *const RawDirectoryEntry;
+    unsafe fn from_ptr_mut<'fs>(entry: *mut u8) -> (*mut RawDirectoryEntry, &'fs BStr) {
+        let dir_entry = entry as *mut RawDirectoryEntry;
         let name_start = entry.offset(core::mem::size_of::<RawDirectoryEntry>() as isize);
         let name_slice =
             core::slice::from_raw_parts(name_start, (*dir_entry).name_len as usize).as_bstr();
@@ -100,34 +102,47 @@ impl<'fs, 'device> Inode<'fs, 'device> {
     pub fn get_data(&self) -> *const InodeData {
         self.data
     }
-    /*pub fn create_inode(
+
+    pub fn create_inode_in_dir(
         &self,
         kind: EntryKind,
         perms: Permission,
-        name: &BStr,
+        user_id: u16,
+        group_id: u16,
+        name: &[u8],
     ) -> Option<InodeRef> {
+        if let EntryKind::Directory = kind {
+            unimplemented!("Can't create a directory")
+        }
         let ty_perm = unsafe { (*self.data).type_permission };
         if ty_perm.contains(TypePermission::DIR) {
             let new_inode_ref = self.fs.reserve_inode(self.group);
+            log::trace!(
+                "Assigning inode {:?} (name: {})",
+                new_inode_ref,
+                name.as_bstr()
+            );
             let inode = unsafe { self.fs.get_inode_in_table(new_inode_ref.0) };
 
-            let entry = RawDirectoryEntry {
-                inode: new_inode_ref,
-                size: (core::mem::size_of::<RawDirectoryEntry>() + name.len()) as u16,
-                name_len: name.len() as u8,
-                kind,
+            let mut entries = DirectoryEntries {
+                reader: Cursor::new(self),
             };
+            entries.add_entry(kind, name, new_inode_ref);
 
             unsafe {
                 (*inode).type_permission = kind.to_typeperm() | perms.to_typeperm();
+                (*inode).hard_link_to_inode = 1;
+                (*inode).user_id = user_id;
+                (*inode).group_id = group_id;
             }
-            todo!()
+            Some(new_inode_ref)
         } else {
             None
         }
-    }*/
+    }
     pub fn cursor(&self) -> Option<Cursor<'_, 'fs, 'device>> {
         let ty_perm = unsafe { (*self.data).type_permission };
+        log::trace!("Getting cursor on inode {}, perms: {:?}", self.id, ty_perm);
         if ty_perm.contains(TypePermission::DIR) {
             None
         } else if ty_perm.contains(TypePermission::REGULAR_FILE) {
@@ -156,6 +171,7 @@ impl<'fs, 'device> Inode<'fs, 'device> {
         new_block
     }
     pub fn get_dir_entries(&self) -> Option<DirectoryEntries<'_, 'fs, 'device>> {
+        log::trace!("Getting entries on inode {}", self.id);
         if !unsafe { (*self.data).type_permission }.contains(TypePermission::DIR) {
             None
         } else {
@@ -165,215 +181,160 @@ impl<'fs, 'device> Inode<'fs, 'device> {
             })
         }
     }
-}
-
-struct InodeBlocks<'inode, 'fs, 'device> {
-    remaining_blocks: u32,
-    block_count: usize,
-    single_count: usize,
-    double_count: usize,
-    triple_count: usize,
-    inode: &'inode Inode<'fs, 'device>,
-}
-
-impl<'inode, 'fs, 'device> InodeBlocks<'inode, 'fs, 'device> {
-    fn new(inode: &'inode Inode<'fs, 'device>) -> Self {
-        let block_size = inode.fs.block_size as u32;
-        let total_size = unsafe { (*inode.data).size_lower_32_bits };
-        let remaining_blocks = if total_size % block_size == 0 {
-            total_size / block_size
-        } else {
-            (total_size / block_size) + 1
-        };
-        InodeBlocks {
-            remaining_blocks,
-            block_count: 0,
-            single_count: 0,
-            double_count: 0,
-            triple_count: 0,
-            inode,
-        }
-    }
-}
-
-impl<'inode, 'fs, 'device> core::iter::Iterator for InodeBlocks<'inode, 'fs, 'device> {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining_blocks > 0 {
-            if self.block_count < 12 {
-                //TODO: use the indirections
-                let block = unsafe { (*self.inode.data).direct_block_pointers[self.block_count] };
-                self.block_count += 1;
-                self.remaining_blocks -= 1;
-
-                if block == 0 {
-                    panic!(
-                        "Tried to read from block 0:\nRem: {}, Blocks: {:?}",
-                        self.remaining_blocks,
-                        unsafe { (*self.inode.data).direct_block_pointers }
-                    );
-                }
-                log::trace!("next block for inode {} is {}", self.inode.id, block);
-                Some(block)
-            } else {
-                panic!("Can't read in indirect blocks")
-            }
-        } else {
-            None
-        }
+    pub fn size(&self) -> u32 {
+        unsafe { (*self.data).size_lower_32_bits }
     }
 }
 
 pub struct Cursor<'inode, 'fs, 'device> {
-    total_index: u32,
-    total_remaining: u32,
-
-    index_in_block: u32,
-    remaining_in_block: u32,
-
-    block_size: u32,
-    allocated_blocks: InodeBlocks<'inode, 'fs, 'device>,
-    current_head: Option<*mut u8>,
     inode: &'inode Inode<'fs, 'device>,
+
+    total_index: u32,
+    block_size: u32,
 }
 impl<'inode, 'fs, 'device> Cursor<'inode, 'fs, 'device> {
     fn new(inode: &'inode Inode<'fs, 'device>) -> Self {
-        let block_size = inode.fs.block_size as u32;
-        let mut blocks = InodeBlocks::new(inode);
-        let current_block = blocks.next();
-        let current_head = unsafe { current_block.map(|block| inode.fs.get_block(block)) };
-        let total_size = unsafe { (*inode.data).size_lower_32_bits };
         Self {
-            total_index: 0,
-            total_remaining: total_size,
-
-            index_in_block: 0,
-            remaining_in_block: core::cmp::min(total_size, block_size),
-
-            block_size,
-            allocated_blocks: blocks,
-            current_head,
             inode,
+            total_index: 0,
+            block_size: inode.fs.block_size as u32,
         }
     }
-    pub fn advance(&mut self, mut count: u32) {
-        while count > 0 {
-            if self.index_in_block < self.block_size {
-                let remaining_in_block = self.block_size - self.index_in_block;
-                let advance_amount = core::cmp::min(remaining_in_block, count);
-                count -= advance_amount;
-
-                self.index_in_block += advance_amount;
-                self.total_index += advance_amount;
-
-                self.current_head = unsafe {
-                    self.current_head
-                        .map(|ptr| ptr.offset(advance_amount as isize))
-                };
-            } else {
-                self.index_in_block = 0;
-                match self.allocated_blocks.next() {
-                    Some(b) => self.current_head = unsafe { Some(self.inode.fs.get_block(b)) },
-                    None => return,
+    /// This returns a ptr aligned to the start of the place you want
+    /// to do something on, with the maximum bytes available
+    #[inline]
+    fn get_ptr(&self) -> Option<(*mut u8, u32)> {
+        let block_ptr = unsafe { self.inode.fs.get_block(self.get_current_block_index()?) };
+        let index_in_block = self.total_index % self.block_size;
+        Some((
+            unsafe { block_ptr.offset(index_in_block as isize) },
+            self.block_size - index_in_block,
+        ))
+    }
+    #[inline]
+    fn remain_in_block(&self) -> u32 {
+        self.block_size - (self.total_index % self.block_size)
+    }
+    #[inline]
+    fn get_current_block_index(&self) -> Option<u32> {
+        let block_count = self.total_index / self.block_size;
+        if block_count > 12 {
+            panic!("Can't use more than 12 blocks");
+        } else {
+            match unsafe { (*self.inode.get_data()).direct_block_pointers[block_count as usize] } {
+                0 => None,
+                b => {
+                    log::trace!("Got ptr the block index {} for inode {}", b, self.inode.id);
+                    Some(b)
                 }
             }
         }
     }
-    pub fn advance_to_end(&mut self) {
-        self.advance(unsafe { (*self.inode.data).size_lower_32_bits });
+    #[inline]
+    unsafe fn peek_access_with<T>(
+        &self,
+        f: impl Fn(*mut u8, u32) -> Option<(T, u32)>,
+    ) -> Option<(T, u32)> {
+        let (current_position, remain) = self.get_ptr()?;
+        f(current_position, remain)
     }
-    pub fn write(&mut self, data: &[u8]) {
-        let mut current = 0;
-        let mut head = match self.current_head {
-            Some(h) => h,
-            None => unsafe { self.inode.fs.get_block(self.inode.reserve_block()) },
-        };
-        while current < data.len() as u32 {
-            if self.index_in_block < self.block_size {
-                unsafe {
-                    (*head) = data[current as usize];
-                    self.current_head = Some(head.offset(1));
-                    head = head.offset(1);
-                }
-                self.total_index += 1;
-                self.index_in_block += 1;
-                current += 1;
-            } else {
-                self.index_in_block = 0;
-                match self.allocated_blocks.next() {
-                    Some(b) => head = unsafe { self.inode.fs.get_block(b) },
-                    None => head = unsafe { self.inode.fs.get_block(self.inode.reserve_block()) },
-                }
-                self.current_head = Some(head);
+    #[inline]
+    unsafe fn access_with<T>(
+        &mut self,
+        f: impl Fn(*mut u8, u32) -> Option<(T, u32)>,
+    ) -> Option<(T, u32)> {
+        match self.peek_access_with(f) {
+            None => None,
+            Some((ptr, read)) => {
+                self.total_index += read;
+                Some((ptr, read))
             }
         }
-        let current_size = unsafe { (*self.inode.data).size_lower_32_bits };
-        let new_size = core::cmp::max(current_size, self.total_index);
-        unsafe { (*self.inode.data).size_lower_32_bits = new_size }
     }
-
-    fn advance_block(&mut self) -> bool {
-        let block = match self.allocated_blocks.next() {
-            Some(b) => b,
-            None => return false,
-        };
-        let block_size = self.inode.fs.block_size as u32;
-        self.index_in_block = 0;
-        self.remaining_in_block = core::cmp::min(self.total_remaining, block_size);
-        log::trace!(
-            "Setting {} as current_block in inode {} cursor",
-            block,
-            self.inode.id
-        );
-        self.current_head = unsafe { Some(self.inode.fs.get_block(block)) };
-        true
+    #[inline]
+    pub unsafe fn peek_with<T>(
+        &self,
+        f: impl Fn(*const u8, u32) -> Option<(T, u32)>,
+    ) -> Option<(T, u32)> {
+        let (current_position, remain) = self.get_ptr()?;
+        f(current_position, remain)
     }
-    /// Safety: You can't read more than a block boundry
-    /// The function should take a pointer to the start of the region, and the maximum amount
-    /// you can read
+    #[inline]
     pub unsafe fn read_with<T>(
         &mut self,
-        reader: impl Fn(*mut u8, u32) -> (T, u32),
+        f: impl Fn(*const u8, u32) -> Option<(T, u32)>,
     ) -> Option<(T, u32)> {
-        if self.remaining_in_block == 0 {
-            if !self.advance_block() {
-                return None;
+        match self.peek_with(f) {
+            None => None,
+            Some((ptr, read)) => {
+                self.total_index += read;
+                Some((ptr, read))
             }
         }
-        let current_block = self.current_head?;
-        let (value, size) = reader(current_block, self.remaining_in_block);
-        assert!(
-            size <= self.remaining_in_block,
-            "tried to read {} bytes, remaining_in_block was {}",
-            size,
-            self.remaining_in_block
-        );
-        log::trace!(
-            "read a value of size {}. {} remaining in block",
-            size,
-            self.remaining_in_block
-        );
-        self.index_in_block += size;
-        self.remaining_in_block -= size;
-        self.current_head = Some(current_block.offset(size as isize));
-        Some((value, size))
     }
-    /// Reads up to max_amount bytes from the inode
-    pub fn read(&mut self, max_amount: Option<u32>) -> Option<(*mut u8, u32)> {
-        log::trace!(
-            "reading {:?} at most from inode {}",
-            max_amount,
-            self.inode.id
-        );
+    fn read_to_end_of_block_at_most(&mut self, buffer: &mut [u8]) -> Option<u32> {
+        let (ptr, remain) = self.get_ptr()?;
+
+        let read_amount = core::cmp::min(remain, buffer.len() as u32);
         unsafe {
-            self.read_with(|input, remaining_in_block| {
-                let amount = match max_amount {
-                    Some(max_amount) => core::cmp::min(max_amount, remaining_in_block),
-                    None => remaining_in_block,
-                };
-                (input, amount)
-            })
+            core::ptr::copy_nonoverlapping(ptr, buffer.as_mut_ptr(), read_amount as usize);
+        }
+
+        self.total_index += read_amount;
+        Some(read_amount)
+    }
+    #[inline]
+    pub fn read(&mut self, buffer: &mut [u8]) -> usize {
+        let mut index = 0;
+        log::trace!("Reading at most {} bytes from inode {}", buffer.len(), self.inode.id);
+        while index < buffer.len() {
+            match self.read_to_end_of_block_at_most(&mut buffer[index..]) {
+                None => break,
+                Some(read_amount) => index += read_amount as usize,
+            }
+        }
+        index
+    }
+    fn allocate_new_block(&mut self) -> *mut u8 {
+        let new_block_index = self.inode.reserve_block();
+        unsafe { self.inode.fs.get_block(new_block_index) }
+    }
+    fn write_to_end_of_block_at_most(&mut self, data: &[u8]) -> u32 {
+        let (ptr, remain) = self
+            .get_ptr()
+            .unwrap_or_else(|| (self.allocate_new_block(), self.block_size));
+        let write_amount = core::cmp::min(remain, data.len() as u32);
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, write_amount as usize);
+        }
+
+        self.total_index += write_amount;
+        write_amount
+    }
+    #[inline]
+    pub fn write(&mut self, data: &[u8]) {
+        let mut index = 0;
+        while index < data.len() {
+            index += self.write_to_end_of_block_at_most(&data[index..]) as usize;
+        }
+    }
+    #[inline]
+    pub fn advance(&mut self, amount: u32) {
+        // You should not advance to outside what is currently defined
+        self.total_index += core::cmp::min(amount, self.inode.size());
+    }
+    #[inline]
+    pub fn advance_to_end(&mut self) {
+        self.advance(self.inode.size() - self.total_index)
+    }
+    fn align(&mut self, align_to: u32) -> Option<u32> {
+        let index_in_block = self.total_index % self.block_size;
+        let misalign = index_in_block % align_to;
+        if misalign > self.remain_in_block() {
+            None
+        } else {
+            Some(misalign)
         }
     }
 }
@@ -382,16 +343,110 @@ pub struct DirectoryEntries<'inode, 'fs, 'device> {
     reader: Cursor<'inode, 'fs, 'device>,
 }
 
+impl<'inode, 'fs, 'device> DirectoryEntries<'inode, 'fs, 'device> {
+    /// Make sure thant name.len() < 255
+    fn add_entry(&mut self, kind: EntryKind, name: &[u8], inode: InodeRef) {
+        let new_entry_size = (name.len() + core::mem::size_of::<RawDirectoryEntry>()) as u16;
+        loop {
+            match unsafe { self.peek() } {
+                None => todo!("No peeking in entries"),
+                Some((dir_entry, split_name)) => {
+                    let padding_size: u16 = unsafe {
+                        (*dir_entry).size
+                            - (u16::from((*dir_entry).name_len)
+                                + core::mem::size_of::<RawDirectoryEntry>() as u16)
+                    };
+                    // We don't have the space to insert our entry, let's try the next one
+                    if padding_size < new_entry_size {
+                        log::trace!("Skipping {}, only has {} padding", split_name, padding_size);
+                        self.next();
+                        continue;
+                    }
+                    match self.reader.align(4) {
+                        // We are in the next block, we do what we must
+                        None => todo!("Writing to next block for dir entries"),
+                        Some(correction) => {
+                            log::trace!("Trying {}, checking align", split_name);
+                            let remaining_padding = padding_size - correction as u16;
+                            if remaining_padding < new_entry_size {
+                                log::trace!("Skipping {}, only has {} padding after align (corrected by {} bytes)", split_name, remaining_padding, correction);
+                                self.next();
+                                continue;
+                            } else {
+                                // We can now change the length of the current entry to leave space
+                                // for ours
+                                // The space of the new entry is (*dir_entry).size + correction
+                                log::trace!("Splitting {} to write new entry", split_name);
+                                unsafe {
+                                    (*dir_entry).size = correction as u16
+                                        + u16::try_from(split_name.len())
+                                            .expect("name was not an u16")
+                                        + core::mem::size_of::<RawDirectoryEntry>() as u16;
+                                    self.reader.advance((*dir_entry).size as u32);
+                                };
+                                let new_raw_entry = RawDirectoryEntry {
+                                    inode,
+                                    size: remaining_padding,
+                                    name_len: u8::try_from(name.len())
+                                        .expect("name was more than 255"),
+                                    kind,
+                                };
+                                unsafe {
+                                    self.write_dir_entry(new_raw_entry, name);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unsafe fn write_dir_entry(&mut self, entry: RawDirectoryEntry, name: &[u8]) {
+        self.reader.write(core::slice::from_raw_parts(
+            &entry as *const RawDirectoryEntry as *const u8,
+            core::mem::size_of::<RawDirectoryEntry>(),
+        ));
+        self.reader.write(name);
+    }
+
+    unsafe fn peek(&self) -> Option<(*mut RawDirectoryEntry, &'fs BStr)> {
+        let ((dir_entry, name), _) = self.reader.peek_access_with(|input, remain| {
+            if remain < core::mem::size_of::<RawDirectoryEntry>() as u32 {
+                None
+            } else {
+                Some(DirectoryEntries::read_raw_entry(input))
+            }
+        })?;
+        if (*dir_entry).size == 0 {
+            None
+        } else {
+            Some((dir_entry, name))
+        }
+    }
+
+    unsafe fn read_raw_entry(start: *mut u8) -> ((*mut RawDirectoryEntry, &'fs BStr), u32) {
+        log::trace!("Reading directory entry from {:?}", start);
+        let (dir_entry, name) = RawDirectoryEntry::from_ptr_mut(start);
+        log::trace!("name {:?}, entry", name);
+        ((dir_entry, name), (*dir_entry).size as u32)
+    }
+}
+
 impl<'inode, 'fs, 'device> core::iter::Iterator for DirectoryEntries<'inode, 'fs, 'device> {
     type Item = DirectoryEntry<'fs>;
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            let ((dir_entry, name), _) = self.reader.read_with(|input, _| {
-                log::trace!("Reading directory entry from {:?}", input);
-                let (dir_entry, name) = RawDirectoryEntry::from_ptr(input);
-                ((dir_entry, name), (*dir_entry).size as u32)
+            let ((dir_entry, name), _) = self.reader.access_with(|input, remain| {
+                if remain < core::mem::size_of::<RawDirectoryEntry>() as u32 {
+                    None
+                } else {
+                    Some(DirectoryEntries::read_raw_entry(input))
+                }
             })?;
+
+            log::trace!("Reading raw entry {:?}", *dir_entry);
             let entry = DirectoryEntry::from_raw(dir_entry, name);
             if entry.size == 0 {
                 None

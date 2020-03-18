@@ -88,8 +88,8 @@ impl<'device> FileSystem<'device> {
             index += 1;
             bitmap_block = unsafe { bitmap_block.offset(1) };
         }
-
         let byte = unsafe { *bitmap_block };
+        log::trace!("Found space in bitmap at index {}: {:08b}", index, byte);
 
         let mut reserved_in_current = None;
         for i in 0..8 {
@@ -99,18 +99,26 @@ impl<'device> FileSystem<'device> {
             }
         }
         let reserved_in_current = reserved_in_current.unwrap();
+
+        log::trace!("Space is at index {}", reserved_in_current);
         unsafe { *bitmap_block |= 1 << reserved_in_current }
-        index * 8 + reserved_in_current
+
+        let index = index * 8 + reserved_in_current;
+        log::trace!("total index is {}", index);
+        index
     }
     fn reserve_block(&self, group: u32) -> u32 {
+        log::trace!("reserving new block in group {}", group);
         let bitmap =
             self.get_block_group_descriptor_table()[group as usize].block_address_of_block_bitmap;
         self.reserve_bitmap(unsafe { self.get_block(bitmap) })
     }
     fn reserve_inode(&self, group: u32) -> InodeRef {
+        log::trace!("reserving new inode in group {}", group);
         let bitmap =
             self.get_block_group_descriptor_table()[group as usize].block_address_of_inode_bitmap;
-        InodeRef(self.reserve_bitmap(unsafe { self.get_block(bitmap) }))
+        // Inodes start at 0
+        InodeRef(self.reserve_bitmap(unsafe { self.get_block(bitmap) }) + 1)
     }
 
     pub fn get_inode(&self, inode: InodeRef) -> Inode<'_, 'device> {

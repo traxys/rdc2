@@ -1,7 +1,7 @@
 use memmap::MmapOptions;
 use simplelog::{Config, LevelFilter, TermLogger, TerminalMode};
 
-use rdc2::{inode::EntryKind, Ext2Device, FileSystem, Inode};
+use rdc2::{inode::EntryKind, inode::Permission, Ext2Device, FileSystem, Inode};
 
 fn list(fs: &FileSystem<'_>, inode: &Inode<'_, '_>, tabs: usize) {
     if let Some(entries) = inode.get_dir_entries() {
@@ -15,17 +15,27 @@ fn list(fs: &FileSystem<'_>, inode: &Inode<'_, '_>, tabs: usize) {
                     if entry.name == "lost+found" {
                         continue;
                     }
+                    if entry.name == "thing" {
+                        let dir = fs.get_inode(entry.inode);
+                        dir.create_inode_in_dir(
+                            EntryKind::RegularFile,
+                            Permission::all(),
+                            0,
+                            0,
+                            "wtf_please".as_bytes(),
+                        );
+                    }
                     list(fs, &fs.get_inode(entry.inode), tabs + 4)
                 }
                 EntryKind::RegularFile => {
                     println!("file {}", entry.name);
                     let file = fs.get_inode(entry.inode);
-                    if entry.name == "foo" {
+                    if entry.name == "niche.txt" {
                         write_things(&file);
-                        let mut writer = file.cursor().expect("foo is not a file");
+                        let mut writer = file.cursor().expect("niche.txt is not a file");
                         writer.advance(4);
                         writer.write("9\n".as_bytes());
-                        let mut append = file.end().expect("foo is not a file");
+                        let mut append = file.end().expect("niche.txt is not a file");
                         append.write("500\n".as_bytes());
                         dbg!(unsafe { &*file.get_data() });
                     }
@@ -42,14 +52,13 @@ fn list(fs: &FileSystem<'_>, inode: &Inode<'_, '_>, tabs: usize) {
         }
     }
 }
-fn read_to_end(inode: &Inode<'_, '_>, buffer: &mut Vec<u8>) {
+fn read_to_end(inode: &Inode<'_, '_>, data: &mut Vec<u8>) {
     let mut reader = inode.cursor().expect("Is not a file");
-    while let Some((ptr, size)) = reader.read(None) {
-        if size != 0 {
-            let slice = unsafe { std::slice::from_raw_parts(ptr, size as usize) };
-            buffer.extend_from_slice(slice);
-        } else {
-            break;
+    let mut buffer = [0; 128];
+    loop {
+        match reader.read(&mut buffer) {
+            0 => break,
+            n => data.extend_from_slice(&buffer[0..n]),
         }
     }
 }
@@ -61,7 +70,7 @@ fn write_things(inode: &Inode<'_, '_>) {
 }
 
 fn main() {
-    TermLogger::init(LevelFilter::Info, Config::default(), TerminalMode::Mixed)
+    TermLogger::init(LevelFilter::Trace, Config::default(), TerminalMode::Mixed)
         .expect("no terminal");
 
     let file = std::fs::OpenOptions::new()
